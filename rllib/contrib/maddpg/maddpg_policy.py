@@ -10,7 +10,7 @@ from ray.rllib.policy.tf_policy import TFPolicy
 from ray.rllib.utils import try_import_tf, try_import_tfp
 
 import logging
-from gym.spaces import Box, Discrete
+from gym.spaces import Box, Discrete, MultiDiscrete
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,8 @@ class MADDPGTFPolicy(MADDPGPostprocessing, TFPolicy):
     def __init__(self, obs_space, act_space, config):
         # _____ Initial Configuration
         config = dict(ray.rllib.contrib.maddpg.DEFAULT_CONFIG, **config)
-        self.config = config
         self.global_step = tf.train.get_or_create_global_step()
+        self.nvec = None
 
         # FIXME: Get done from info is required since agentwise done is not
         # supported now.
@@ -62,6 +62,9 @@ class MADDPGTFPolicy(MADDPGPostprocessing, TFPolicy):
         if type(agent_id) is not int:
             raise ValueError("Agent ids must be integers for MADDPG.")
 
+        if isinstance(act_space, MultiDiscrete):
+            self.nvec = act_space.nvec
+
         # _____ Environment Setting
         def _make_continuous_space(space):
             if isinstance(space, Box):
@@ -69,6 +72,12 @@ class MADDPGTFPolicy(MADDPGPostprocessing, TFPolicy):
             elif isinstance(space, Discrete):
                 return Box(
                     low=np.zeros((space.n, )), high=np.ones((space.n, )))
+
+            elif isinstance(space, MultiDiscrete):
+                return Box(
+                    low=np.zeros((np.sum(space.nvec), )), high=np.ones((np.sum(space.nvec, )))
+                )
+
             else:
                 raise UnsupportedSpaceException(
                     "Space {} is not supported.".format(space))
@@ -368,9 +377,14 @@ class MADDPGTFPolicy(MADDPGPostprocessing, TFPolicy):
                 out = tf.layers.dense(out, units=hidden, activation=activation)
             feature = tf.layers.dense(
                 out, units=act_space.shape[0], activation=None)
-            sampler = tfp.distributions.RelaxedOneHotCategorical(
-                temperature=1.0, logits=feature).sample()
 
+            if self.nvec is None:
+                sampler = tfp.distributions.RelaxedOneHotCategorical(
+                    temperature=1.0, logits=feature).sample()
+            else:
+                sampler= tf.concat([tfp.distributions.RelaxedOneHotCategorical(
+                            temperature=1.0, logits=feature).sample() for feature in
+                                    tf.split(feature, self.nvec, axis=1)], axis=1)
         return sampler, feature, model, tf.global_variables(scope.name)
 
     def update_target(self, tau=None):
